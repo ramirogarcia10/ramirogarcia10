@@ -1,0 +1,201 @@
+name: xScanner workflow
+on:
+  workflow_dispatch:
+    inputs:
+      application:
+        description: 'Artifact/s to use during this run: `all`, `analytic`, `api`, `common`, `contract-watcher`, `fly`, `parser`, `pipeline`, `spy` or `tx-tracker`'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - analytic
+          - api
+          - common
+          - contract-watcher
+          - fly
+          - parser
+          - pipeline
+          - spy
+          - tx-tracker
+      branch:
+        description: 'Branch or tag from `wormhole-explorer` to use as source'
+        required: true
+        default: 'main'
+        type: string
+      environment:
+        description: 'Target environment for this execution'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - testnet
+          - production
+          - sandbox
+      type:
+        description: 'Workflow execution type: `build`, `deploy` or `both`'
+        required: true
+        default: 'build'
+        type: choice
+        options:
+          - build
+          - deploy
+          - both
+      version:
+        description: 'Version tag to use'
+        required: true
+        default: 'dev'
+        type: string
+jobs:
+  build-single:
+    if: ${{ github.event.inputs.type }} != 'deploy' && ${{ github.event.inputs.application }} != 'all'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    steps:
+      - name: Clone wormhole-explorer repository
+        uses: actions/checkout@v3
+        with:
+          repository: wormhole-foundation/wormhole-explorer
+          ref: ${{ github.event.inputs.branch }}
+      - name: Create wh-explorer-deploy directory
+        run : |
+          mkdir -p ./wh-explorer-deploy/
+      - name: Checkout WH explorer deploy
+        uses: actions/checkout@v3
+        with:
+          path: wh-explorer-deploy
+      - name: Golang 1.19 setup
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.19
+      - name: Build baseline artifacts
+        run: make build
+      - name: Build application
+        working-directory: ./${{ github.event.inputs.application }}
+        run: make build
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.IAM_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.OPS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.OPS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-duration-seconds: 3600
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+        with:
+          registries: ${{ secrets.ECR_ACCOUNT_ID }} # dev account
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Ensure repository exists in AWS ECR
+        env:
+          DOCKERFILE_PATH: ${{ github.workspace }}/${{ github.event.inputs.application }}/Dockerfile
+          ECR_REPOSITORY: xscanner-${{ github.event.inputs.application }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          IMAGE_TAG: ${{ github.event.inputs.version }}
+        working-directory: ./wh-explorer-deploy/automation/ci
+        shell: bash
+        run: |
+          chmod +x repo_creation.sh
+          ./repo_creation.sh
+      - name: Build and push image AWS ECR
+        env:
+          DOCKERFILE_PATH: ${{ github.workspace }}/${{ github.event.inputs.application }}/Dockerfile
+          ECR_REPOSITORY: xscanner-${{ github.event.inputs.application }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          IMAGE_TAG: ${{ github.event.inputs.version }}
+        run: |
+          docker build --no-cache --tag "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" -f $DOCKERFILE_PATH .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+  # build-all:
+  #   if: ${{ github.event.inputs.type }} != 'deploy' && ${{ github.event.inputs.application }} == 'all'
+  #   runs-on: ubuntu-latest
+  #   environment: ${{ github.event.inputs.environment }}
+  #   strategy:
+  #     matrix:
+  #       application: [analytic, api, common, contract-watcher, fly, parser, pipeline, spy, tx-tracker]
+  #   steps:
+  #     - name: Clone wormhole-explorer repository
+  #       uses: actions/checkout@v3
+  #       with:
+  #         ref: main
+  #     - name: Golang 1.19 setup
+  #       uses: actions/setup-go@v2
+  #       with:
+  #         go-version: 1.19
+  #     - name: Build baseline artifacts
+  #       run: make build
+  #     - name: Build application
+  #       working-directory: ./${{ matrix.application }}
+  #       run: make build
+  #     - name: Configure AWS Credentials
+  #       uses: aws-actions/configure-aws-credentials@v2
+  #       with:
+  #         role-to-assume: ${{ secrets.IAM_ROLE_ARN }}
+  #         aws-access-key-id: ${{ secrets.OPS_ACCESS_KEY_ID }}
+  #         aws-secret-access-key: ${{ secrets.OPS_SECRET_ACCESS_KEY }}
+  #         aws-region: ${{ vars.AWS_REGION }}
+  #         role-duration-seconds: 3600
+  #     - name: Login to AWS ECR
+  #       id: login-ecr
+  #       uses: aws-actions/amazon-ecr-login@v1
+  #       with:
+  #         aws-region: ${{ vars.AWS_REGION }}
+  #     - name: Build and tag Docker image
+  #       env:
+  #         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+  #         ECR_REPOSITORY: xscanner-${{ matrix.application }}
+  #         IMAGE_TAG: ${{ github.event.inputs.version }}
+  #       run: |
+  #         docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+  #     - name: Ensure repository exists in AWS ECR
+  #       env:
+  #         ECR_REPOSITORY: xscanner-${{ matrix.application }}
+  #       run: |
+  #         aws ecr describe-repositories --region ${{ vars.AWS_REGION }} --repository-names $ECR_REPOSITORY || aws ecr create-repository --region ${{ vars.AWS_REGION }} --repository-name $ECR_REPOSITORY --image-scanning-configuration scanOnPush=true
+  #     - name: Push Docker image to AWS ECR
+  #       env:
+  #         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+  #         ECR_REPOSITORY: xscanner-${{ matrix.application }}
+  #         IMAGE_TAG: ${{ github.event.inputs.version }}
+  #       run: |
+  #         docker push -a $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+  deploy-single:
+    if: ${{ github.event.inputs.type }} != 'build' && ${{ github.event.inputs.application }} != 'all'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    needs: [build-single]
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v3
+        with:
+          ref: main
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.IAM_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.OPS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.OPS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-duration-seconds: 3600
+      - name: Replace Release name and version
+        env:
+          RELEASE_NAME: ${{ steps.login-ecr.outputs.registry }}
+          VERSION: ${{ github.event.inputs.version }}
+        run: |
+          sed -i "s/REPLACE-APP-NAME/$RELEASE_NAME/g" ./helm/Chart.yaml
+          sed -i "s/REPLACE-APP-VERSION/$VERSION/g" ./helm/Chart.yaml
+          sed -i "s/REPLACE-IMAGE-VERSION/${ECR_REGISTRY}/${ECR_REPOSITORY}:$VERSION/g" "./helm/config/values-common.yaml"
+#      - name: Install application's Helm chart
+#        uses: bitovi/github-actions-deploy-eks-helm@v1.2.2
+#        env:
+#          ENV_VALUES_PATH: "./values/${{ github.event.inputs.application }}-values-${{ github.event.inputs.environment }}"
+#        with:
+#          aws-region: ${{ vars.AWS_REGION }}
+
+#          cluster-name: ${{ secrets.CLUSTER_NAME }}
+#          config-files: "./helm/config/values-common.yaml",$ENV_VALUES_PATH
+#          namespace: sandbox
