@@ -1,4 +1,4 @@
-Hi, I'm Ramiro Garcia, Systems Engineer with more than 10 years as System Admin.
+Hi, I'm Ramiro Garcia, Systems Engineer with more than 10 years as Devops/System Admin.
 - 👀 I'm interested in learning about new devops tools.
 - 🌱 I'm currently learning kubernetes and terraform.
 - 💞️ I am looking to collaborate on blockchain and Ethereum projects.
